@@ -1,76 +1,72 @@
-// 16-bit interleaved-channel splitter (interleaving across T), with optional flips.
-// Assumptions: C=1, Z=1, T=n; input is 16-bit (8-bit also supported, but kept as-is).
-// Run via: Plugins > New > Script (Language: JavaScript)
+// 16-bit interleaved-channel splitter (interleaving across T) with:
+// 1) safe duplication of the input
+// 2) resize to 750x750 (with calibration updated)
+// 3) optional horizontal flip (X) and Z flip
+//
+// Assumptions: input hyperstack is C=1, Z=1, T>=2 (channels interleaved across time)
 
 importClass(Packages.ij.IJ);
 importClass(Packages.ij.ImagePlus);
 importClass(Packages.ij.ImageStack);
 importClass(Packages.ij.measure.Calibration);
+importClass(Packages.ij.process.ImageProcessor);
+importClass(Packages.ij.process.ShortProcessor);
+importClass(Packages.ij.process.ByteProcessor);
 
 // -------------------- options --------------------
-var flipX = true;   // mirror left-right
-var flipZ = true;   // reverse slice order (Z)
+var duplicateInput = true;   // don't touch the original
+var targetW = 750, targetH = 750; // registration working size
+var flipX = true;            // mirror left-right
+var flipZ = true;            // reverse slice order (Z)
 // -------------------------------------------------
 
-var imp = IJ.getImage();
-var width  = imp.getWidth();
-var height = imp.getHeight();
+// Get source and make a working copy
+var srcImp = IJ.getImage();
+var imp = duplicateInput ? srcImp.duplicate() : srcImp;
+if (duplicateInput) imp.setTitle(srcImp.getTitle() + " [dup]");
+
+// Dimensional checks
 var nC = imp.getNChannels();
 var nZ = imp.getNSlices();
 var nT = imp.getNFrames();
 var bitDepth = imp.getBitDepth();
-
-IJ.log("Detected stack: C=" + nC + ", Z=" + nZ + ", T=" + nT + ", bitDepth=" + bitDepth);
+var w0 = imp.getWidth(), h0 = imp.getHeight();
+IJ.log("Detected: C=" + nC + " Z=" + nZ + " T=" + nT + " bit=" + bitDepth + " size=" + w0 + "x" + h0);
 if (nC != 1 || nZ != 1 || nT < 2) {
   IJ.error("Expected C=1, Z=1, T>=2 (interleaved channels across time).");
   throw "Wrong dimensionality";
 }
-
-// Build output stacks; we reuse the original pixel arrays (no conversion)
-var greenStack = new ImageStack(width, height);
-var redStack   = new ImageStack(width, height);
-
-// Split frames: even -> Green, odd -> Red (0-based t)
-var srcStack = imp.getStack();
-for (var t = 0; t < nT; t++) {
-  var idx = imp.getStackIndex(1, 1, t + 1); // C=1, Z=1, T=t+1
-  var pixels = srcStack.getPixels(idx);     // short[] for 16-bit; byte[] if 8-bit
-  if ((t & 1) === 0) greenStack.addSlice(null, pixels);
-  else               redStack.addSlice(null, pixels);
+if (!(bitDepth == 16 || bitDepth == 8)) {
+  IJ.error("Only 16-bit or 8-bit images supported.");
+  throw "Unsupported bit depth";
 }
 
-// Clone calibration & metadata
-function cloneCalibration(srcImp) {
+// Helpers
+function scaledCalibration(srcImp, newW, newH) {
+  // Preserve physical FOV after resizing by scaling pixel size
   var s = srcImp.getCalibration();
   var c = new Calibration(srcImp);
-  c.pixelWidth  = s.pixelWidth;
-  c.pixelHeight = s.pixelHeight;
-  c.pixelDepth  = s.pixelDepth;
+  var sx = srcImp.getWidth()  / newW;
+  var sy = srcImp.getHeight() / newH;
+  c.pixelWidth  = s.pixelWidth  * sx;
+  c.pixelHeight = s.pixelHeight * sy;
+  c.pixelDepth  = s.pixelDepth; // unchanged (no Z resampling)
   c.setUnit(s.getUnit());
   c.xOrigin = s.xOrigin; c.yOrigin = s.yOrigin; c.zOrigin = s.zOrigin;
   c.frameInterval = s.frameInterval;
   c.setTimeUnit(s.getTimeUnit());
   return c;
 }
-var info = imp.getProperty("Info");
 
-function makeImp(name, st) {
+function makeOutImp(name, st, cal, infoStr) {
   var out = new ImagePlus(name, st);
   out.setDimensions(1, st.getSize(), 1); // C=1, Z=depth, T=1
   out.setOpenAsHyperStack(true);
-  out.setCalibration(cloneCalibration(imp));
-  if (info != null) out.setProperty("Info", info);
+  out.setCalibration(cal);
+  if (infoStr != null) out.setProperty("Info", infoStr);
   return out;
 }
 
-var greenImp = makeImp("Green", greenStack);
-var redImp   = makeImp("Red",   redStack);
-
-// Free source before flips to save RAM
-// imp.close();
-
-// ---- flips ----
-// Works for both 16-bit (short[]) and 8-bit (byte[]) pixel arrays.
 function flipStackHoriz(st) {
   var w = st.getWidth(), h = st.getHeight(), n = st.getSize();
   for (var s = 1; s <= n; s++) {
@@ -78,8 +74,7 @@ function flipStackHoriz(st) {
     for (var y = 0; y < h; y++) {
       var L = y * w, R = L + w - 1;
       while (L < R) {
-        var tmp = pix[L]; pix[L] = pix[R]; pix[R] = tmp;
-        L++; R--;
+        var tmp = pix[L]; pix[L] = pix[R]; pix[R] = tmp; L++; R--;
       }
     }
   }
@@ -92,13 +87,49 @@ function reversedStack(st) {
   return out;
 }
 
+// Prepare output stacks at target size
+var needResize = (w0 != targetW) || (h0 != targetH);
+var outW = targetW, outH = targetH;
+var greenStack = new ImageStack(outW, outH);
+var redStack   = new ImageStack(outW, outH);
+
+// Split (even T -> Green, odd T -> Red), resizing each frame to 750x750
+var srcStack = imp.getStack();
+for (var t = 0; t < nT; t++) {
+  var idx = imp.getStackIndex(1, 1, t + 1); // C=1, Z=1, T=t+1
+  var srcPix = srcStack.getPixels(idx);
+
+  // Build an ImageProcessor for this frame
+  var ip;
+  if (bitDepth == 16) ip = new ShortProcessor(w0, h0, srcPix, null);
+  else                ip = new ByteProcessor (w0, h0, srcPix, null);
+
+  ip.setInterpolationMethod(ImageProcessor.BILINEAR);
+  var rp = needResize ? ip.resize(outW, outH) : ip.duplicate(); // ensure separate buffer
+  var dstPix = rp.getPixels();
+
+  if ((t & 1) === 0) greenStack.addSlice(null, dstPix);
+  else               redStack.addSlice(null,  dstPix);
+}
+
+// Build ImagePlus with proper calibration + metadata (scaled if resized)
+var info = srcImp.getProperty("Info");
+var outCal = scaledCalibration(imp, outW, outH);
+
+var greenImp = makeOutImp("Green", greenStack, outCal, info);
+var redImp   = makeOutImp("Red",   redStack,   outCal, info);
+
+// Free working duplicate if we made one (original stays open, untouched)
+if (duplicateInput) imp.close();
+
+// Apply flips on outputs
 if (flipX) { flipStackHoriz(greenImp.getStack()); flipStackHoriz(redImp.getStack()); }
 if (flipZ) { greenImp.setStack(reversedStack(greenImp.getStack()));
              redImp.setStack(reversedStack(redImp.getStack())); }
 
-// Optional: set display LUTs (doesn't alter data type/intensities)
+// Optional LUTs for visualization only (data remain 16-bit)
 // IJ.run(greenImp, "Green", ""); IJ.run(redImp, "Red", "");
 
-// Show final images (16-bit)
+// Show results
 greenImp.show();
 redImp.show();
