@@ -1,85 +1,104 @@
-// Code separates channels; frame 1 as green, frame 2 as red.
-// Assumptions: C = 1, Z = 1, T = n; 8-bit input
+// 16-bit interleaved-channel splitter (interleaving across T), with optional flips.
+// Assumptions: C=1, Z=1, T=n; input is 16-bit (8-bit also supported, but kept as-is).
+// Run via: Plugins > New > Script (Language: JavaScript)
 
+importClass(Packages.ij.IJ);
 importClass(Packages.ij.ImagePlus);
 importClass(Packages.ij.ImageStack);
-importClass(Packages.ij.IJ);
-importClass(Packages.ij.measure.Calibration);   // <-- add
+importClass(Packages.ij.measure.Calibration);
+
+// -------------------- options --------------------
+var flipX = true;   // mirror left-right
+var flipZ = true;   // reverse slice order (Z)
+// -------------------------------------------------
 
 var imp = IJ.getImage();
-var stack = imp.getStack();
-var width = imp.getWidth();
+var width  = imp.getWidth();
 var height = imp.getHeight();
-var nFrames = imp.getNFrames();
-var nSlices = imp.getNSlices();
-var nChannels = imp.getNChannels();
+var nC = imp.getNChannels();
+var nZ = imp.getNSlices();
+var nT = imp.getNFrames();
+var bitDepth = imp.getBitDepth();
 
-IJ.log("Detected stack: C=" + nChannels + ", Z=" + nSlices + ", T=" + nFrames);
-
-if (nChannels != 1 || nSlices != 1) {
-    IJ.error("Expected a 1-channel, 1-slice per frame hyperstack (interleaved in T).");
-    exit();
+IJ.log("Detected stack: C=" + nC + ", Z=" + nZ + ", T=" + nT + ", bitDepth=" + bitDepth);
+if (nC != 1 || nZ != 1 || nT < 2) {
+  IJ.error("Expected C=1, Z=1, T>=2 (interleaved channels across time).");
+  throw "Wrong dimensionality";
 }
 
-// Prepare output stacks
+// Build output stacks; we reuse the original pixel arrays (no conversion)
 var greenStack = new ImageStack(width, height);
-var redStack = new ImageStack(width, height);
+var redStack   = new ImageStack(width, height);
 
-// Loop through frames (T)
-for (var t = 0; t < nFrames; t++) {
-    var index = imp.getStackIndex(1, 1, t + 1);  // C=1, Z=1, T=t+1
-    var pixels = stack.getPixels(index);
-    if (t % 2 == 0) {
-        greenStack.addSlice(null, pixels);
-    } else {
-        redStack.addSlice(null, pixels);
-    }
+// Split frames: even -> Green, odd -> Red (0-based t)
+var srcStack = imp.getStack();
+for (var t = 0; t < nT; t++) {
+  var idx = imp.getStackIndex(1, 1, t + 1); // C=1, Z=1, T=t+1
+  var pixels = srcStack.getPixels(idx);     // short[] for 16-bit; byte[] if 8-bit
+  if ((t & 1) === 0) greenStack.addSlice(null, pixels);
+  else               redStack.addSlice(null, pixels);
 }
 
-// Helper: clone spatial calibration from source
+// Clone calibration & metadata
 function cloneCalibration(srcImp) {
-    var src = srcImp.getCalibration();
-    var c = new Calibration(srcImp);
-    c.pixelWidth  = src.pixelWidth;
-    c.pixelHeight = src.pixelHeight;
-    c.pixelDepth  = src.pixelDepth;     // your "Voxel depth 2"
-    c.setUnit(src.getUnit());           // e.g., "micron"
-    c.xOrigin = src.xOrigin; c.yOrigin = src.yOrigin; c.zOrigin = src.zOrigin;
-    // Keep time metadata too (not used when T=1, but harmless to preserve)
-    c.frameInterval = src.frameInterval;
-    c.setTimeUnit(src.getTimeUnit());
-    return c;
+  var s = srcImp.getCalibration();
+  var c = new Calibration(srcImp);
+  c.pixelWidth  = s.pixelWidth;
+  c.pixelHeight = s.pixelHeight;
+  c.pixelDepth  = s.pixelDepth;
+  c.setUnit(s.getUnit());
+  c.xOrigin = s.xOrigin; c.yOrigin = s.yOrigin; c.zOrigin = s.zOrigin;
+  c.frameInterval = s.frameInterval;
+  c.setTimeUnit(s.getTimeUnit());
+  return c;
+}
+var info = imp.getProperty("Info");
+
+function makeImp(name, st) {
+  var out = new ImagePlus(name, st);
+  out.setDimensions(1, st.getSize(), 1); // C=1, Z=depth, T=1
+  out.setOpenAsHyperStack(true);
+  out.setCalibration(cloneCalibration(imp));
+  if (info != null) out.setProperty("Info", info);
+  return out;
 }
 
-// Create new ImagePlus from output stacks and apply calibration & metadata
-var srcCal = cloneCalibration(imp);
-var info = imp.getProperty("Info"); // Bio-Formats/OME text metadata if present
+var greenImp = makeImp("Green", greenStack);
+var redImp   = makeImp("Red",   redStack);
 
-if (greenStack.getSize() > 0) {
-    var greenImp = new ImagePlus("Green", greenStack);
-    greenImp.setDimensions(1, greenStack.getSize(), 1);  // C=1, Z=depth, T=1
-    greenImp.setOpenAsHyperStack(true);
-    greenImp.setCalibration(srcCal);                      // <-- preserve pixel size/units
-    if (info != null) greenImp.setProperty("Info", info); // <-- optional: copy text metadata
-    // Optional: set a green LUT for visualization
-    // IJ.run(greenImp, "Green", "");
-    greenImp.show();
-} else {
-    IJ.log("Green stack is empty!");
-}
-
-if (redStack.getSize() > 0) {
-    var redImp = new ImagePlus("Red", redStack);
-    redImp.setDimensions(1, redStack.getSize(), 1);
-    redImp.setOpenAsHyperStack(true);
-    redImp.setCalibration(cloneCalibration(imp));         // separate instance of calibration
-    if (info != null) redImp.setProperty("Info", info);
-    // Optional: set a red LUT
-    // IJ.run(redImp, "Red", "");
-    redImp.show();
-} else {
-    IJ.log("Red stack is empty!");
-}
-
-// Close original if you want to free RAM
+// Free source before flips to save RAM
 // imp.close();
+
+// ---- flips ----
+// Works for both 16-bit (short[]) and 8-bit (byte[]) pixel arrays.
+function flipStackHoriz(st) {
+  var w = st.getWidth(), h = st.getHeight(), n = st.getSize();
+  for (var s = 1; s <= n; s++) {
+    var pix = st.getPixels(s); // short[] or byte[]
+    for (var y = 0; y < h; y++) {
+      var L = y * w, R = L + w - 1;
+      while (L < R) {
+        var tmp = pix[L]; pix[L] = pix[R]; pix[R] = tmp;
+        L++; R--;
+      }
+    }
+  }
+}
+
+function reversedStack(st) {
+  var n = st.getSize(), w = st.getWidth(), h = st.getHeight();
+  var out = new ImageStack(w, h);
+  for (var s = n; s >= 1; s--) out.addSlice(st.getSliceLabel(s), st.getPixels(s));
+  return out;
+}
+
+if (flipX) { flipStackHoriz(greenImp.getStack()); flipStackHoriz(redImp.getStack()); }
+if (flipZ) { greenImp.setStack(reversedStack(greenImp.getStack()));
+             redImp.setStack(reversedStack(redImp.getStack())); }
+
+// Optional: set display LUTs (doesn't alter data type/intensities)
+// IJ.run(greenImp, "Green", ""); IJ.run(redImp, "Red", "");
+
+// Show final images (16-bit)
+greenImp.show();
+redImp.show();
