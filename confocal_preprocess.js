@@ -1,14 +1,12 @@
 // Fiji / ImageJ (JavaScript) script
-// Save each channel of a 3‑channel 8‑bit z‑stack to .nrrd with a custom naming scheme.
-//
-// Naming format per channel:
-//   [fishID]_round[roundNumber]_channel[channelNumber]_[targetGene].nrrd
-//
+// Save each channel of a 3-channel 8-bit z-stack to .nrrd with a custom naming scheme.
+// [fishID]_round[roundNumber]_channel[channelNumber]_[targetGene].nrrd
+
 // --- USER SETTINGS ---------------------------------------------------------
-var fishID = "YOUR_FISH_ID";              // e.g., "m38"
-var roundNumber = 1;                       // e.g., 1
+var fishID = "L331_f01";
+var roundNumber = 1;
 // Ordered list of target genes per channel index (1-based):
-var targetGenes = ["geneC1", "geneC2", "geneC3"]; // length should match number of channels
+var targetGenes = ["GCaMP", "sst1_1", "pth2"]; // must match #channels
 // ---------------------------------------------------------------------------
 
 // Java imports
@@ -17,9 +15,10 @@ importClass(Packages.ij.io.DirectoryChooser);
 importClass(Packages.ij.plugin.Duplicator);
 
 // ---- Helpers --------------------------------------------------------------
+
+// Find the exact internal command key for "File > Save As > Nrrd ..."
 function detectNrrdCommandKey() {
   var cmds = Packages.ij.Menus.getCommands();
-  // Debug: list all commands containing 'Nrrd'
   var keys = cmds.keySet().toArray();
   var foundList = [];
   for (var i = 0; i < keys.length; i++) {
@@ -28,67 +27,94 @@ function detectNrrdCommandKey() {
       foundList.push(k);
     }
   }
-  IJ.log("[DBG] Commands containing 'Nrrd': " +
-         (foundList.length ? foundList.join(" | ") : "<none>"));
+  IJ.log("[DBG] Commands containing 'Nrrd': " + (foundList.length ? foundList.join(" | ") : "<none>"));
 
-  // First try some common variants
-  var candidates = ["Nrrd ...", "Nrrd...", "Nrrd", "Nrrd Save..."];
+  var candidates = ["Nrrd ... ", "Nrrd...", "Nrrd", "Nrrd Save..."];
   for (var j = 0; j < candidates.length; j++) {
     if (cmds.containsKey(candidates[j])) {
       return candidates[j];
     }
   }
-
-  // Otherwise return the first match we found
-  if (foundList.length > 0) {
-    return foundList[0];
-  }
+  if (foundList.length > 0) return foundList[0];
   return null;
 }
 
-
-// Suppress NRRD file dialog by feeding options via Macro.setOptions, then verify file exists
+// Suppress NRRD file dialog by feeding options via Macro.setOptions,
+// then verify that the output file was actually created.
+// Try many option formats + both IJ.run forms (with & without imp)
 function saveAsNrrd_NoDialogs(imp, outPath, nrrdCmdKey) {
   importClass(Packages.ij.Macro);
   importClass(Packages.java.io.File);
   importClass(Packages.java.lang.System);
 
-  var optionPatterns = [
-    function(p){ return "save=[" + p + "]"; },
-    function(p){ return "path=[" + p + "]"; },
-    function(p){ return "file=[" + p + "]"; },
-    function(p){ return "output=[" + p + "]"; }
+  // Build a battery of option strings to try
+  var p = outPath;
+  var q = "\"" + outPath + "\"";  // double-quoted
+  var s = "'" + outPath + "'";    // single-quoted
+
+  var tokens = [
+    "save=" + p,      "save=[" + p + "]",      "save=" + q,      "save=" + s,
+    "path=" + p,      "path=[" + p + "]",      "path=" + q,      "path=" + s,
+    "file=" + p,      "file=[" + p + "]",      "file=" + q,      "file=" + s,
+    "output=" + p,    "output=[" + p + "]",    "output=" + q,    "output=" + s
   ];
 
-  for (var i = 0; i < optionPatterns.length; i++) {
-    var opt = optionPatterns[i](outPath);
-    try {
-      IJ.log("[DBG] Trying NRRD save via '" + nrrdCmdKey + "' with options: " + opt);
-      Macro.setOptions(opt);          // next IJ.run reads these options
-      var t0 = System.currentTimeMillis();
-      IJ.run(imp, nrrdCmdKey, "");   // run headless; plugin should not open a dialog
-      var t1 = System.currentTimeMillis();
-      Macro.setOptions(null);         // clear
-      IJ.log("[DBG] IJ.run returned in " + (t1 - t0) + " ms");
+  function fileOk() {
+    var f = new java.io.File(outPath);
+    return f.exists() && f.length() > 0;
+  }
 
-      var f = new java.io.File(outPath);
-      if (f.exists() && f.length() > 0) {
-        IJ.log("[DBG] Verified file exists (" + f.length() + " bytes): " + outPath);
+  // Variant A: run bound to the duplicate image window
+  for (var i = 0; i < tokens.length; i++) {
+    var opt = tokens[i];
+    try {
+      IJ.log("[DBG] A) IJ.run(imp,'" + nrrdCmdKey + "', opt): " + opt);
+      Macro.setOptions(opt);
+      var t0 = System.currentTimeMillis();
+      IJ.run(imp, nrrdCmdKey, "");                // empty arg; options via Macro.setOptions
+      var dt = System.currentTimeMillis() - t0;
+      Macro.setOptions(null);
+
+      if (fileOk()) {
+        IJ.log("[DBG]   ✔ wrote file via A) in " + dt + " ms: " + outPath);
         return true;
       } else {
-        IJ.log("[DBG] After run, file does not exist yet: " + outPath);
+        IJ.log("[DBG]   ✖ no file from A) (dt=" + dt + " ms).");
       }
-    } catch (e) {
+    } catch (eA) {
       Macro.setOptions(null);
-      IJ.log("[DBG] Exception during NRRD save with options '" + opt + "': " + e);
+      IJ.log("[DBG]   EXC A) " + eA);
     }
   }
-  return false;
-}
+
+  // Variant B: run as a global command (some plugins only look at global options)
+  for (var j = 0; j < tokens.length; j++) {
+    var opt2 = tokens[j];
+    try {
+      IJ.log("[DBG] B) IJ.run('" + nrrdCmdKey + "', opt): " + opt2);
+      Macro.setOptions(opt2);
+      var t1 = System.currentTimeMillis();
+      IJ.run(nrrdCmdKey, "");                     // no imp; options via Macro.setOptions
+      var dt2 = System.currentTimeMillis() - t1;
+      Macro.setOptions(null);
+
+      if (fileOk()) {
+        IJ.log("[DBG]   ✔ wrote file via B) in " + dt2 + " ms: " + outPath);
+        return true;
+      } else {
+        IJ.log("[DBG]   ✖ no file from B) (dt=" + dt2 + " ms).");
+      }
+    } catch (eB) {
+      Macro.setOptions(null);
+      IJ.log("[DBG]   EXC B) " + eB);
+    }
   }
+
   return false;
 }
 
+
+// ---- Main -----------------------------------------------------------------
 (function main() {
   var imp = IJ.getImage();
   if (imp == null) {
@@ -96,86 +122,85 @@ function saveAsNrrd_NoDialogs(imp, outPath, nrrdCmdKey) {
     return;
   }
 
+  // Resolve the exact NRRD command key installed in THIS Fiji
   var nrrdKey = detectNrrdCommandKey();
   if (nrrdKey == null) {
     IJ.error(
-    "Could not find an installed NRRD writer command." 
-    +
-    "I looked for any command containing 'Nrrd' in Fiji's command map." 
-    +
-    "Please ensure File > Save As > Nrrd ... exists."
-  );
+      "Could not find an installed NRRD writer command.\n" +
+      "I looked for any command containing 'Nrrd' in Fiji's command map.\n" +
+      "Please ensure File > Save As > Nrrd ... exists."
+    );
     return;
   }
   IJ.log("Using NRRD command key: '" + nrrdKey + "'");
 
+  // Basic checks
   var nC = imp.getNChannels();
   var nZ = imp.getNSlices();
   var nT = imp.getNFrames();
   var isHyper = imp.isHyperStack();
   var bitDepth = imp.getBitDepth();
 
+  IJ.log("[DBG] Image C/Z/T/bitDepth = " + [nC, nZ, nT, bitDepth].join("/"));
   if (bitDepth !== 8) {
     IJ.log("WARNING: Detected bit depth " + bitDepth + ". This script expects an 8-bit stack.");
   }
-
   if (nC < 1) {
     IJ.error("Image has no channels.");
     return;
   }
-
   if (targetGenes.length < nC) {
-    IJ.error("targetGenes list (length=" + targetGenes.length + ") is shorter than number of channels (" + nC + ").\nUpdate targetGenes to match your channels.");
+    IJ.error(
+      "targetGenes list (length=" + targetGenes.length + ") is shorter than number of channels (" + nC + ").\n" +
+      "Update targetGenes to match your channels."
+    );
     return;
   }
-
   if (!isHyper && (nC > 1)) {
     IJ.log("Input is not a HyperStack; attempting to proceed using channel range duplication.");
   }
 
+  // Choose an output directory once; we will provide full paths to the plugin
   var dc = new DirectoryChooser("Choose output folder for .nrrd files");
   var outDir = dc.getDirectory();
   if (outDir == null) {
     IJ.error("No output directory selected. Aborting.");
     return;
   }
-
   if (!outDir.match(/\/$/)) outDir = outDir + "/";
+  IJ.log("[DBG] Output directory: " + outDir);
 
+  // Loop channels (1-based indexing in ImageJ hyperstacks)
   for (var c = 1; c <= nC; c++) {
     var gene = targetGenes[c - 1];
     var baseName = fishID + "_round" + roundNumber + "_channel" + c + "_" + gene;
     var outPath = outDir + baseName + ".nrrd";
 
-    IJ.log("Processing channel " + c + ", gene=" + gene + ", outPath=" + outPath);
+    IJ.log("[DBG] Processing channel " + c + " -> " + baseName);
 
+    // Duplicate the current channel across all Z/T
     var dup = new Duplicator().run(imp, c, c, 1, nZ, 1, Math.max(1, nT));
     if (dup == null) {
       IJ.error("Failed to duplicate channel " + c + ".");
       return;
     }
-
     dup.setTitle(baseName);
     dup.show();
-    IJ.log("Duplicated and showing: " + baseName);
 
     var ok = saveAsNrrd_NoDialogs(dup, outPath, nrrdKey);
-    IJ.log("saveAsNrrd_NoDialogs returned: " + ok);
-
     dup.close();
 
     if (!ok) {
       IJ.error(
-        "NRRD save failed without dialogs. Your NRRD plugin may require specific option names." 
-        +
-        "Turn on Plugins > Macros > Record..., save one image via File > Save As > Nrrd ..., and paste the recorded command/options so I can wire them in." 
-        +
+        "NRRD save failed without dialogs.\n" +
+        "Your NRRD plugin may require specific option names.\n" +
+        "Turn on Plugins > Macros > Record..., save one image via File > Save As > Nrrd ..., and paste the recorded command/options so I can wire them in.\n" +
         "Attempted path: " + outPath
       );
       return;
     }
 
-    IJ.log("Saved (attempted): " + outPath);
+    IJ.log("Saved (verified): " + outPath);
   }
 
   IJ.showStatus("Done: Saved " + nC + " channel(s) to NRRD in " + outDir);
