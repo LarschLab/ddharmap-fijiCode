@@ -23,7 +23,7 @@ macro "Preprocess 2P Anatomy (single-channel)" {
 
     // Duplicate so we never touch the original
     origTitle = getTitle();
-    outTitle  = origTitle + "_anatomy_preproc";
+    outTitle  = "preproc_" + origTitle ;
     run("Duplicate...", "title="+outTitle+" duplicate");
     selectWindow(outTitle);
 
