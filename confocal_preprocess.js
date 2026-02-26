@@ -3,7 +3,7 @@
 // [fishID]_round[roundNumber]_channel[channelNumber]_[targetGene].nrrd
 
 // --- USER SETTINGS ---------------------------------------------------------
-var fishID = "L331_f01";
+var fishID = "L396_f04";
 var roundNumber = 1;
 // Ordered list of target genes per channel index (1-based):
 var targetGenes = ["GCaMP", "sst1_1", "pth2"]; // must match #channels
